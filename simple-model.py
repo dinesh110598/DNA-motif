@@ -57,7 +57,7 @@ class SimpleModel:
         self.n = n # Total number of generated sequences
         self.l = l # Length of each sequence
         self.r = r # Total number of modules
-        self.w = 10 # Length of each motif
+        self.w = 20 # Bounding length of each motif
         
         # Initializing various variables for simulation of 
         # sequences X. Loading from saved values here:
@@ -72,9 +72,14 @@ class SimpleModel:
         self.X = SequenceGenerator(self.phi, self.motifs, 
                                    self.I, self.Z)
         self.markov_nn = Generate_NN()
+        self.anchors = self.generate_anchors()
     
     def model(self, low, size):
         MarkovModule = pyro.module("BG Neural model", self.markov_nn)
+        # Prior sampling of motifs PWMs
+        m_prior = torch.full((self.r, self.w, 4), 0.1)
+        motifs = pyro.sample("motifs", dist.Dirichlet( #type:ignore
+            m_prior))
         for i in pyro.plate("Batch", size):
             i = i+low
             X_oh = nn.functional.one_hot(self.X[i:i+1], 4).float()  # type: ignore
@@ -92,10 +97,6 @@ class SimpleModel:
                         [dist.transforms.AffineTransform(0., 90., 0)])
             Z = pyro.sample("Z_{}".format(i), d)
             Z = Z.round().int()
-            # Prior sampling of motifs PWMs
-            m_prior = torch.full((self.r, self.w, 4), 0.1)
-            motifs = pyro.sample("motifs", dist.Dirichlet( #type:ignore
-                m_prior))
             for u in pyro.markov(range(Z), history=2):  # type:ignore
                 probs = MarkovModule(X_oh[:, u:u+2, :])[0]
                 pyro.sample("X_{}_{}".format(i,u), 
@@ -114,6 +115,10 @@ class SimpleModel:
                             obs=self.X[i, u])
     
     def guide(self, low, size):
+        concs = pyro.param("Concentrations",
+                           torch.full((self.r, self.w, 4), 0.1),
+                           dist.constraints.positive)
+        pyro.sample("motifs", dist.Dirichlet(concs))  # type: ignore
         for i in pyro.plate("Batch", size):
             i = i+low
             I_p = neural_Module1(self.X[i])
@@ -124,8 +129,26 @@ class SimpleModel:
             d = dist.Delta(pos)
             pyro.sample("Z_{}".format(i), d)
             
-            concs = pyro.param("Concentrations", 
-                               torch.full((self.r, self.w, 4), 0.1),
-                               dist.constraints.positive)
-            pyro.sample("motifs", dist.Dirichlet(concs)) # type: ignore
+            
+            
+    def generate_anchors(self, anchor_len=[5, 10, 15], 
+                         feature_stride=10):
+        """Generates anchors for use with RPN network
+
+        Args:
+            anchor_len (list, optional): Set of allowed widths for
+            anchors. Defaults to [5, 10, 15, 20].
+            feature_stride (int, optional): Spacing of allowed starting
+            positions for anchors starting from 0. Defaults to 10
+        """
+        # The anchors will be characterized by two indices: Z and w
+        Z = torch.arange(0, self.l, feature_stride)
+        w = torch.tensor(anchor_len)
+        anchors = torch.cartesian_prod(Z, w) #That's a neat function
+        # to achieve the goal!
+        return anchors
+    
+    def RPN_net(self):
+        pass
+            
         
