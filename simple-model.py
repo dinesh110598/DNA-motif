@@ -1,59 +1,14 @@
 # %%
 import torch
 import torch.nn as nn
+from torch.nn import functional as F
 import pyro.distributions as dist
 import pyro
-import numpy as np
+from utils import DiscretizedBeta, Generate_NN, SequenceGenerator
 # %%
-# This model assumes one motif (of fixed length) per module 
-# and every sequence having an unknown module identity
-
-def SequenceGenerator(phi: torch.Tensor, motifs: torch.Tensor, I: torch.Tensor,
-                      Z: torch.Tensor, n: int=1000, l: int=100, r: int=3):
-
-    X = np.empty((n, l), dtype=int)
-    g = np.random.default_rng()
-    phi2 = phi.numpy()
-
-    for i in range(n):
-        prob = np.mean(phi2, axis=(0, 1))
-        X[i, 0] = g.choice(4, p=prob)  # Marginalizing for positions 1,2
-        prob = np.mean(phi2, axis=0)[X[i, 0], :]
-        X[i, 1] = g.choice(4, p=prob)
-        
-        for u in range(2, Z[i]):  # Markov sampling for bg DNA
-            prob = phi2[X[i, u-2], X[i, u-1], :]
-            X[i, u] = g.choice(4, p=prob)
-        
-        X[i, Z[i]:Z[i]+10] = motifs[I[i], :] # Motif at pos Z[i]
-        
-        for u in range(Z[i]+10, n):  # Markov sampling for bg DNA
-            prob = phi2[X[i, u-2], X[i, u-1], :]
-            X[i, u] = g.choice(4, p=prob)            
-
-    return torch.from_numpy(X)  # Declare X as torch tensor
-
-
-def Generate_NN(depth=2, width=16):
-    layers = []
-    assert depth >= 0
-    layers.append(nn.Flatten())
-    if depth == 0:
-        layers.append(nn.Linear(8, 4))
-    elif depth > 0:
-        layers.append(nn.Linear(8, width))
-        layers.append(nn.ReLU())
-        for _ in range(depth-1):
-            layers.append(nn.Linear(width, width))
-            layers.append(nn.ReLU())
-        layers.append(nn.Linear(width, 4))
-
-    layers.append(nn.Softmax(dim=-1))
-    return nn.Sequential(*layers)
-
 
 class SimpleModel:
-    def __init__(self, n=1000, l=100, r=3) -> None:
+    def __init__(self, n=2000, l=100, r=3) -> None:
         self.n = n # Total number of generated sequences
         self.l = l # Length of each sequence
         self.r = r # Total number of modules
@@ -61,94 +16,137 @@ class SimpleModel:
         
         # Initializing various variables for simulation of 
         # sequences X. Loading from saved values here:
-        self.phi = torch.load("saved_phi.pt")
-        self.motifs = torch.load("saved_motifs.pt")
-        self.I = torch.load("saved_I.pt")
-        self.Z = torch.load("saved_Z.pt")
+        self.phi0 = torch.load("saved_phi.pt")
+        self.w0 = torch.load("saved_w.pt")
+        self.pwm0 = torch.load("saved_pwm.pt")
+        self.I0 = torch.load("saved_I.pt")
+        self.Z0 = torch.load("saved_Z.pt")
         
         # Above variables will be used only for generating X and later
         # for evaluating the performance of our model. The model trains on
         # X alone to infer the values of various latent variables
-        self.X = SequenceGenerator(self.phi, self.motifs, 
-                                   self.I, self.Z)
-        self.markov_nn = Generate_NN()
-        self.anchors = self.generate_anchors()
+        #self.X = SequenceGenerator(self.phi0, self.pwm0, self.w0, 
+                                   #self.I0, self.Z0)
+        self.X = torch.load("saved_X.pt")
+        self.markov_nn = pyro.module("BG Neural model", Generate_NN())
     
     def model(self, low, size):
-        MarkovModule = pyro.module("BG Neural model", self.markov_nn)
         # Prior sampling of motifs PWMs
-        m_prior = torch.full((self.r, self.w, 4), 0.1)
-        motifs = pyro.sample("motifs", dist.Dirichlet( #type:ignore
-            m_prior))
+        pwm_prior = dist.Dirichlet(torch.full((self.r, self.w, 4), 0.1))
+        with pyro.plate("pwm loop2", self.w):
+            with pyro.plate("pwm loop3", self.r):
+                pwm = pyro.sample("pwm", pwm_prior)
+        
+        w_prior = DiscretizedBeta(5, 21, torch.tensor(2.),
+                                  torch.tensor(2.)).expand(
+                                      torch.Size([self.r]))
+        with pyro.plate("w loop", self.r):
+            w = pyro.sample("w", w_prior)
+            
+        # Prior sampling of module identities I
+        I_prior = torch.ones([size, self.r])
+        with pyro.plate("I loop", size):
+            I = pyro.sample("I_{}:{}".format(low, low+size),
+                        dist.Categorical(logits=I_prior))
+            
+        X_oh = F.one_hot(self.X[low:low+size], 4).float()
+        # One hot categorical encoding of the sequences
+        X_oh = torch.concat([torch.zeros(size, 2, 4), X_oh], dim=1).float()
+        # Padding each sequence with zeros in the beginning
+
         for i in pyro.plate("Batch", size):
             i = i+low
-            X_oh = nn.functional.one_hot(self.X[i:i+1], 4).float()  # type: ignore
-            # One hot categorical encoding of the sequences
-            X_oh = torch.concat([torch.zeros(1, 2, 4), X_oh], dim=1).float()
-            # Padding each sequence with zeros in the beginning
             
-            # Prior sampling of module identities I
-            I_prior = torch.ones(self.r)
-            I = pyro.sample("I_{}".format(i), 
-                            dist.Categorical(logits=I_prior)) #type:ignore
             # Prior sampling of motif positions Z
-            d = dist.Beta(5., 5.) # type: ignore
+            d = dist.Beta(5., 5.) 
             d = dist.TransformedDistribution(d, #type: ignore
                         [dist.transforms.AffineTransform(0., 90., 0)])
             Z = pyro.sample("Z_{}".format(i), d)
             Z = Z.round().int()
             for u in pyro.markov(range(Z), history=2):  # type:ignore
-                probs = MarkovModule(X_oh[:, u:u+2, :])[0]
+                probs = self.markov_nn(X_oh[i-low:i-low+1, u:u+2, :])[0]
                 pyro.sample("X_{}_{}".format(i,u), 
-                            dist.Categorical(probs),  # type: ignore
+                            dist.Categorical(probs),  
                             obs=self.X[i, u])
             with pyro.plate("motif"):
-                pyro.sample("X_{}_m".format(i, Z, Z+self.w),
-                            dist.Categorical(motifs[I]), # type: ignore
-                            obs=self.X[i, Z:Z+self.w]
+                pyro.sample("X_{}_m".format(i),
+                            dist.Categorical(pwm[I, :w[I[i-low]], :]),
+                            obs=self.X[i, Z:Z+w[I[i-low]]]
                             )
             for u in pyro.markov(range(Z+self.w, self.l),
                                  history=2): # type: ignore
-                probs = MarkovModule(X_oh[:, u:u+2, :])[0]
+                probs = self.markov_nn(X_oh[i-low:i-low+1, u:u+2, :])[0]
                 pyro.sample("X_{}_{}".format(i, u),
-                            dist.Categorical(probs),  # type: ignore
+                            dist.Categorical(probs), 
                             obs=self.X[i, u])
     
-    def guide(self, low, size):
-        concs = pyro.param("Concentrations",
-                           torch.full((self.r, self.w, 4), 0.1),
-                           dist.constraints.positive)
-        pyro.sample("motifs", dist.Dirichlet(concs))  # type: ignore
-        for i in pyro.plate("Batch", size):
-            i = i+low
-            I_p = neural_Module1(self.X[i])
-            pyro.sample("I_{}".format(i),
-                            dist.Categorical(logits=I_p))  # type:ignore
-            
-            pos = neural_Module2(self.X[i])
-            d = dist.Delta(pos)
-            pyro.sample("Z_{}".format(i), d)
-            
-            
-            
-    def generate_anchors(self, anchor_len=[5, 10, 15], 
-                         feature_stride=10):
-        """Generates anchors for use with RPN network
+    def guide_bf(self, low, size):
+        phi_param = pyro.param("phi_param", torch.ones([4, 4, 4]))
+        softmax = nn.Softmax(-1)
+        d = dist.Delta(softmax(phi_param))
+        with pyro.plate("phi loop1", 4):
+            with pyro.plate("phi loop2", 4):
+                with pyro.plate("phi loop3", 4):
+                    phi = pyro.sample("phi", d)
+        phi_1 = torch.mean(phi, dim=0)
+        phi_0 = torch.mean(phi_1, dim=0)
 
-        Args:
-            anchor_len (list, optional): Set of allowed widths for
-            anchors. Defaults to [5, 10, 15, 20].
-            feature_stride (int, optional): Spacing of allowed starting
-            positions for anchors starting from 0. Defaults to 10
-        """
-        # The anchors will be characterized by two indices: Z and w
-        Z = torch.arange(0, self.l, feature_stride)
-        w = torch.tensor(anchor_len)
-        anchors = torch.cartesian_prod(Z, w) #That's a neat function
-        # to achieve the goal!
-        return anchors
-    
-    def RPN_net(self):
-        pass
-            
+        pwm_param = pyro.param("pwm_param", 
+                               torch.full([self.r, 20, 4], 0.1))
+        d = dist.Dirichlet(pwm_param)
+        with pyro.plate("pwm loop1", 4):
+            with pyro.plate("pwm loop2", 20):
+                with pyro.plate("pwm loop3", self.r):
+                    pwm = pyro.sample("pwm", d)
+
+        w_param = pyro.param("w_param", torch.ones([self.r, 2]))**2
+        d = [DiscretizedBeta(5, 21, w_param[j, 0], w_param[j, 1])
+            for j in range(self.r)]
+        w = torch.empty([self.r], dtype=torch.int64).detach()
+        for j in pyro.plate("w loop", self.r):
+            w[torch.tensor(j)] = pyro.sample("w_{}".format(j), 
+                                             d[torch.tensor(j)])
+
+        Xoh = F.one_hot(self.X[low:low+size, :], 4).float()
+
+        for i in pyro.plate("Batch", size):
+            i = i + low
+            y1 = torch.empty([self.r]).detach()
+            y2 = []
+            # Loop over every possible I and Z
+            for j in torch.arange(self.r):
+                y = torch.empty((self.l-w[j], self.l)).detach()
+                for z in torch.arange(self.l-w[j]):
+                    for u in torch.arange(z):
+                        if u == 0:
+                            y[z, u] = torch.dot(Xoh[i, u, :],
+                                                phi_0)
+                        elif u == 1:
+                            y[z, 1] = torch.dot(Xoh[i, u, :],
+                                                phi_1[0, :])
+                        else:
+                            y[z, u] = torch.dot(Xoh[i, u, :],
+                                                phi[self.X[i, u-2], 
+                                                    self.X[i, u-1], :])
+
+                    for u in torch.arange(z, z+w[j]):
+                        y[z, u] = torch.dot(Xoh[i, u, :],
+                                            pwm[j, u-z, :])
+                    for u in torch.arange(z+w[j], self.l):
+                        y[z, u] = torch.dot(Xoh[i, u, :],
+                                            phi[self.X[i, u-2], 
+                                                self.X[i, u-1], :])
+                y = torch.log(y)
+                y2.append(y)
+                y = torch.sum(y, 1)
+                y1[j] = torch.logsumexp(y, 0)
+            I = pyro.sample("I_{}".format(i), 
+                            dist.Categorical(logits=y1))
+
+            pyro.sample("Z_{}".format(i), 
+                        dist.Categorical(logits=y2[I]))
         
+# %%
+obj = SimpleModel()
+obj.model(100, 100)
+# %%
