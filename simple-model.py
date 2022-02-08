@@ -2,7 +2,7 @@
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
-import pyro.distributions as dist
+import torch.distributions as dist
 from pyro.infer import SVI, Trace_ELBO
 import pyro.optim as optim
 import pyro
@@ -62,8 +62,7 @@ class SimpleModel:
         # This is our guess on what possible values of PWM are more likely
         # Dirichlet(0.1) means extreme values close to 0 and 1 are favoured
 
-        w_prior = DiscretizedBeta(5, self.w, torch.tensor(1.),
-                                torch.tensor(1.))
+        w_prior = DiscretizedBeta(5, self.w, 1., 1.)
         w = torch.empty([self.r], dtype=torch.int64)
         for j in pyro.plate("w loop", self.r):
             w[torch.tensor(j)] = pyro.sample("w_{}".format(j),
@@ -209,9 +208,4 @@ class SimpleModel:
         with pyro.plate("pwm loop2", self.w):
             with pyro.plate("pwm loop3", self.r):
                 pwm = pyro.sample("pwm", d)
-                
-        
-# %%
-obj = SimpleModel()
-obj.train_bf(1)
 # %%

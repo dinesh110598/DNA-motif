@@ -1,8 +1,7 @@
 import numpy as np
 import torch
 import torch.nn as nn
-import pyro.distributions as dist
-import pyro
+import torch.distributions as dist
 from scipy import integrate, special
 
 def SequenceGenerator(phi: torch.Tensor, pwm: torch.Tensor, w, I: torch.Tensor,
@@ -53,31 +52,26 @@ def Generate_NN(depth=2, width=16):
     return nn.Sequential(*layers)
 
 # function that integrates the Beta distribution's pdf
-
-
-def beta_integral(x1, x2, a: torch.Tensor, b: torch.Tensor):
+def beta_integral(x1, x2, a: float, b: float):
     def beta_pdf(x):
         return (x**(a-1))*((1-x)**(b-1))/special.beta(a, b)
 
     return integrate.quad(beta_pdf, x1, x2)[0]
 
-
-class DiscretizedBeta(dist.TorchDistribution):
-    def __init__(self, low, high, conc1, conc2):
-        self.beta = dist.Beta(conc1, conc2)
+class DiscretizedBeta(dist.Distribution):
+    def __init__(self, low: int, high: int, a: float, b: float):
+        beta = dist.Beta(a, b)
         self.low = low
         self.high = high
-        self.a = conc1.detach().numpy()
-        self.b = conc2.detach().numpy()
 
         prob = torch.empty(size=[high-low], dtype=torch.float32)
         x = np.linspace(0., 1., high-low+1)
         for i in torch.arange(high-low):
-            prob[i] = beta_integral(x[i], x[i+1], self.a, self.b)
+            prob[i] = beta_integral(x[i], x[i+1], a, b)
 
         self.categorical = dist.Categorical(prob)
 
-        super().__init__(self.beta.batch_shape, self.beta.event_shape,
+        super().__init__(beta.batch_shape, beta.event_shape,
                          validate_args=False)
 
     def sample(self, sample_shape=torch.Size()):
@@ -85,5 +79,4 @@ class DiscretizedBeta(dist.TorchDistribution):
 
     def log_prob(self, value):
         return self.categorical.log_prob(value-self.low)
-    
     
