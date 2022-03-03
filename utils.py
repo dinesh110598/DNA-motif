@@ -6,34 +6,6 @@ import torch.distributions as dist
 from scipy import integrate, special
 
 # %%
-def generate_ground_truth(n=1000, l=100, r=3, w0=5, w1=20):
-    d = dist.Dirichlet(torch.full([4, 4, 4], 2.))
-    phi = d.sample()
-
-    pwm = torch.randint(4, size=(r, w1))
-
-    d = dist.Binomial(w1-w0, 0.5)
-    w = d.sample(torch.Size([r])).long() + w0
-
-    d = dist.Categorical(probs=torch.tensor([0.4, 0.4, 0.2]))
-    I = d.sample(torch.Size([n]))
-
-    d = dist.Beta(2., 2.)
-    Z = torch.stack([torch.round(d.sample()*(l - w[I[i]])).long()
-                     for i in range(n)])
-
-    X = SequenceGenerator(phi, pwm, w, I, Z)
-
-    vars = {
-        "phi": phi,
-        "pwm": pwm,
-        "w": w,
-        "I": I,
-        "Z": Z
-    }
-    torch.save(vars, "saved_latents.pt")
-    torch.save(X, "saved_X.pt")
-
 def SequenceGenerator(phi: torch.Tensor, pwm: torch.Tensor, w, I: torch.Tensor,
                       Z: torch.Tensor, n: int = 1000, l: int = 100, r: int = 3):
 
@@ -62,6 +34,36 @@ def SequenceGenerator(phi: torch.Tensor, pwm: torch.Tensor, w, I: torch.Tensor,
             X[i, u] = g.choice(4, p=prob)
 
     return torch.from_numpy(X)  # Declare X as torch tensor
+
+def generate_ground_truth(n=1000, l=100, r=3, w0=5, w1=20):
+    d = dist.Dirichlet(torch.full([4, 4, 4], 1.))
+    phi = d.sample()
+
+    pwm = torch.randint(4, size=(r, 10))
+
+    #d = dist.Binomial(w1-w0, 0.5)
+    #w = d.sample(torch.Size([r])).long() + w0
+    #Fixed motif width of 10
+    w = torch.full([r], 10, dtype=torch.int32)
+
+    d = dist.Categorical(probs=torch.tensor([0.4, 0.4, 0.2]))
+    I = d.sample(torch.Size([n]))
+
+    d = dist.Beta(1.5, 1.5)
+    Z = torch.round(d.sample(torch.Size([n]))*
+                    (l-10-20)+10).long()
+
+    X = SequenceGenerator(phi, pwm, w, I, Z)
+
+    latents = {
+        "phi": phi,
+        "pwm": pwm,
+        "w": w,
+        "I": I,
+        "Z": Z
+    }
+    torch.save(latents, "saved_latents.pt")
+    torch.save(X, "saved_X.pt")
 
 # function that integrates the Beta distribution's pdf
 def beta_integral(x1, x2, a: float, b: float):
