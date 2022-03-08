@@ -1,25 +1,53 @@
 from torch import nn
 from torch.nn import functional as F
+import numpy as np
 import torch
 
+class MultiLinear(nn.Module):
+    def __init__(self, in_features, out_features,
+                 array_len):
+        super().__init__()
+        i = in_features
+        o = out_features
+        l = array_len
+        self.weight = nn.parameter.Parameter(
+            torch.randn(l, o, i)/np.sqrt(i)
+        )
+        self.bias = nn.parameter.Parameter(
+            torch.zeros([l, o])
+        )
+        
+    def forward(self, x: torch.Tensor):
+        # It's matrix multiplications in
+        # parallel!
+        x = x.unsqueeze(1)
+        x = ((x*self.weight).sum(-1) +
+             self.bias)
+        return x
+
 class PWM_Net(nn.Module):
-    def __init__(self, r, w1) -> None:
+    def __init__(self, r, w):
         super().__init__()
         self.r = r
-        self.w1 = w1
+        self.w = w
+        l = r*w
         self.seq = nn.Sequential(
-            nn.Linear(1, 32, False),
+            MultiLinear(4, 32, l),
             nn.Mish(),
-            nn.Linear(32, 32),
+            MultiLinear(32, 32, l),
             nn.Mish(),
-            nn.Dropout(0.2),
-            nn.Linear(32, 4*r*w1)
+            MultiLinear(32, 32, l),
+            nn.Mish(),
+            MultiLinear(32, 4, l)
         )
         self.sfmax = nn.Softmax(dim=-1)
+        self.ones = torch.ones([l, 4], requires_grad=False)
 
-    def forward(self, x):
-        x = self.seq(x)
-        x = torch.squeeze(x).view([self.r, self.w1, 4])
+    def forward(self, ll):
+        rand = ll*torch.randn_like(self.ones)
+        x = self.seq(self.ones + rand)
+        
+        x = x.view([self.r, self.w, 4])
         return self.sfmax(x)
 
 

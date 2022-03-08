@@ -121,4 +121,3 @@ def logit_normal_lp(x: torch.Tensor):
     y = (-x.log().sum() 
          - 0.05*((x[:-1]/x[-1]).log()**2).sum())
     return y
-# %%
